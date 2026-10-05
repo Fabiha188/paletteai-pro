@@ -16,9 +16,9 @@ const BATCH_SIZE = 6 // how many new palettes to generate per scroll/click
 // a contrast pass between neighbours (so they stay visually distinct).
 // If `lockStyle` is given (user searched a style name), every palette in
 // the batch uses it; otherwise styles cycle for variety.
-function generateBatch(startIndex, lockStyle) {
+function generateBatch(startIndex, lockStyle, pool = STYLES) {
   return Array.from({ length: BATCH_SIZE }, (_, i) => {
-    const style = lockStyle || STYLES[(startIndex + i) % STYLES.length]
+    const style = lockStyle || pool[(startIndex + i) % pool.length]
     const { colors, label } = buildHarmonyPalette(5, style)
     return {
       id: `gen-${Date.now()}-${startIndex + i}-${Math.random().toString(36).slice(2, 7)}`,
@@ -49,11 +49,16 @@ export default function Explore() {
   const [searchTerm, setSearchTerm] = useState('')
   const [allPalettes, setAllPalettes] = useState([])
   const [filtered, setFiltered] = useState([])
-  const [lockedStyle, setLockedStyle] = useState(null) // style the search term matched, if any
   const [isHexSearch, setIsHexSearch] = useState(false)
   const [loadingMore, setLoadingMore] = useState(false)
+  const [loaded, setLoaded] = useState(false) // false while the first palettes are still being fetched
   const genCountRef = useRef(0)
   const sentinelRef = useRef(null)
+  // What the current search allows, read by loadMore without re-creating it:
+  //   matched = null (no search) | [] (nothing matches) | ['pastel', ...]
+  const searchRef = useRef({ isHex: false, locked: null, matched: null })
+  const busyRef = useRef(false)
+  const loadedRef = useRef(false)
 
 
   useEffect(() => {
@@ -106,11 +111,22 @@ export default function Explore() {
       genCountRef.current = BATCH_SIZE
 
       const combined = [...base, ...extra]
+      loadedRef.current = true
       setAllPalettes(combined)
       setFiltered(combined)
+      setLoaded(true)
     }
 
-    load()
+    load().catch(() => {
+      // Even if everything fails, show generated palettes instead of an empty page
+      if (!active) return
+      const fallback = generateBatch(0, null)
+      genCountRef.current = BATCH_SIZE
+      loadedRef.current = true
+      setAllPalettes(fallback)
+      setFiltered(fallback)
+      setLoaded(true)
+    })
     return () => { active = false }
   }, [])
 
@@ -118,16 +134,23 @@ export default function Explore() {
   // Skipped while searching for an exact hex code, since a random palette
   // can't reliably be made to contain a specific colour on demand.
   const loadMore = useCallback(() => {
-    if (loadingMore || isHexSearch) return
+    const { isHex, locked, matched } = searchRef.current
+    if (busyRef.current || !loadedRef.current || isHex) return
+    if (matched && matched.length === 0) return // nothing can ever match this search
+    busyRef.current = true
     setLoadingMore(true)
     setTimeout(() => {
-      const batch = generateBatch(genCountRef.current, lockedStyle)
+      const pool = matched && matched.length ? matched : STYLES
+      const batch = generateBatch(genCountRef.current, locked, pool)
       genCountRef.current += BATCH_SIZE
       setAllPalettes((prev) => [...prev, ...batch])
       setFiltered((prev) => [...prev, ...batch])
+      busyRef.current = false
       setLoadingMore(false)
     }, 250)
-  }, [loadingMore, isHexSearch, lockedStyle])
+  }, [])
+
+  const noResults = loaded && filtered.length === 0
 
   // Infinite scroll: load another batch whenever the sentinel at the
   // bottom of the grid comes into view.
@@ -140,14 +163,14 @@ export default function Explore() {
     )
     observer.observe(el)
     return () => observer.disconnect()
-  }, [loadMore])
+  }, [loadMore, loaded, isHexSearch, noResults])
 
   const handleSearch = (term) => {
     setSearchTerm(term)
 
     const q = term.trim().toLowerCase()
     if (!q) {
-      setLockedStyle(null)
+      searchRef.current = { isHex: false, locked: null, matched: null }
       setIsHexSearch(false)
       setFiltered(allPalettes)
       return
@@ -162,7 +185,7 @@ export default function Explore() {
         searchHex = '#' + searchHex[1].repeat(2) + searchHex[2].repeat(2) + searchHex[3].repeat(2)
       }
       const upper = searchHex.toUpperCase()
-      setLockedStyle(null)
+      searchRef.current = { isHex: true, locked: null, matched: null }
       setIsHexSearch(true)
       setFiltered(allPalettes.filter(p => p.colors.some(c => c.toUpperCase() === upper)))
       return
@@ -173,7 +196,11 @@ export default function Explore() {
     // load in as you scroll keep matching the search.
     setIsHexSearch(false)
     const matchedStyles = STYLES.filter(s => s.includes(q))
-    setLockedStyle(matchedStyles.length === 1 ? matchedStyles[0] : null)
+    searchRef.current = {
+      isHex: false,
+      locked: matchedStyles.length === 1 ? matchedStyles[0] : null,
+      matched: matchedStyles,
+    }
     setFiltered(
       matchedStyles.length
         ? allPalettes.filter(p => matchedStyles.includes(p.style))
@@ -245,7 +272,15 @@ export default function Explore() {
       </div>
 
       <div className="explore-grid">
-        {filtered.length === 0 ? (
+        {!loaded ? (
+          Array.from({ length: 6 }, (_, i) => (
+            <div className="explore-card visible explore-skeleton" key={`sk-${i}`} aria-hidden="true">
+              <div className="sk-row">{Array.from({ length: 5 }, (_, j) => <span key={j} />)}</div>
+              <div className="sk-pill" />
+              <div className="sk-btn" />
+            </div>
+          ))
+        ) : filtered.length === 0 ? (
           <div className="explore-no-results">
             <i className="fas fa-search"></i>
             <p>No palettes match your search.</p>
@@ -268,7 +303,7 @@ export default function Explore() {
         )}
       </div>
 
-      {!isHexSearch && (
+      {loaded && !isHexSearch && !(searchRef.current.matched && searchRef.current.matched.length === 0) && (
         <div className="explore-nav">
           <button
             className="nav-next"
