@@ -146,3 +146,81 @@ describe('normalizeHex', () => {
     expect(normalizeHex('ff6b6b')).toBe('#FF6B6B')
   })
 })
+
+// ---------------------------------------------------------------------------
+// Variety: palettes must differ from each other, and styles must look right
+// ---------------------------------------------------------------------------
+import { buildHarmonyPalette, classifyStyle } from '../src/utils/colorHelpers'
+import { resetColorMemory, deltaE, registerPalette, isTooSimilar } from '../src/utils/colorMemory'
+
+describe('palette variety', () => {
+  it('rarely repeats a colour across 60 consecutive pastel palettes', () => {
+    resetColorMemory()
+    const all = Array.from({ length: 60 }, () => buildHarmonyPalette(5, 'pastel').colors).flat()
+    expect(new Set(all).size).toBeGreaterThan(290) // of 300
+  })
+
+  it('consecutive palettes of the same style are visibly different', () => {
+    resetColorMemory()
+    let sameLooking = 0
+    let prev = buildHarmonyPalette(5, 'warm').colors
+    for (let i = 0; i < 60; i++) {
+      const next = buildHarmonyPalette(5, 'warm').colors
+      const avg = next.reduce((sum, c) => sum + Math.min(...prev.map((p) => deltaE(c, p))), 0) / next.length
+      if (avg < 8) sameLooking++
+      prev = next
+    }
+    expect(sameLooking).toBeLessThan(4)
+  })
+
+  it('the colours within one palette are all clearly distinct', () => {
+    resetColorMemory()
+    for (let i = 0; i < 40; i++) {
+      const c = buildHarmonyPalette(5, i % 2 ? 'pastel' : null).colors
+      for (let a = 0; a < c.length; a++)
+        for (let b = a + 1; b < c.length; b++) expect(deltaE(c[a], c[b])).toBeGreaterThan(4)
+    }
+  })
+
+  it('"warm" palettes only use warm hues and "cool" only cool hues', () => {
+    resetColorMemory()
+    const inRange = (h, [lo, hi]) => [-360, 0, 360].some((s) => h + s >= lo - 6 && h + s <= hi + 6)
+    for (let i = 0; i < 40; i++) {
+      buildHarmonyPalette(5, 'warm').colors.forEach((c) => {
+        const { h, s } = hexToHsl(c)
+        if (s > 25) expect(inRange(h, [-20, 65])).toBe(true)
+      })
+      buildHarmonyPalette(5, 'cool').colors.forEach((c) => {
+        const { h, s } = hexToHsl(c)
+        if (s > 25) expect(inRange(h, [170, 300])).toBe(true)
+      })
+    }
+  })
+
+  it('pastel palettes stay light and soft', () => {
+    resetColorMemory()
+    for (let i = 0; i < 30; i++)
+      buildHarmonyPalette(5, 'pastel').colors.forEach((c) => {
+        const { s, l } = hexToHsl(c)
+        expect(l).toBeGreaterThanOrEqual(62)
+        expect(s).toBeLessThanOrEqual(64)
+      })
+  })
+
+  it('works for a single colour (gradient maker "add colour")', () => {
+    expect(buildHarmonyPalette(1).colors).toHaveLength(1)
+  })
+
+  it('classifyStyle tells warm from cool by hue', () => {
+    expect(classifyStyle(['#E8743B', '#F2A33A', '#D9534F', '#F0C05A'])).toBe('warm')
+    expect(classifyStyle(['#3B82C4', '#5B6ED6', '#2FA4B8', '#7B5BD6'])).toBe('cool')
+  })
+
+  it('memory flags a palette that repeats recent colours', () => {
+    resetColorMemory()
+    const p = ['#FF6B6B', '#FFD93D', '#6BCB77', '#4D96FF', '#9B5DE5']
+    expect(isTooSimilar(p)).toBe(false)
+    registerPalette(p)
+    expect(isTooSimilar(p)).toBe(true)
+  })
+})

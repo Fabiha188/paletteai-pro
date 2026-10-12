@@ -1,9 +1,30 @@
 import { fetchColorScheme } from './api'
+import { hslToHex, hueToCategory } from './colorHelpers'
 
-// Curated seed hues used to ask The Color API for real, live-generated
-// colour schemes (analogic harmonies) each time the Explore page loads.
-const SEED_HUES = ['FF6B6B', '38BDF8', '34D399', 'F472B6', 'FBBF24', '8B5CF6', '06B6D4', 'F97316']
-const STYLE_NAMES = ['Analogic Glow', 'Ocean Scheme', 'Fresh Mint', 'Rose Quartz', 'Golden Hour', 'Violet Dream', 'Cyan Wave', 'Ember Set']
+// The Color API schemes we rotate through (api value, label shown in the name).
+const MODES = [
+  ['analogic', 'Analogic'],
+  ['triad', 'Triad'],
+  ['analogic-complement', 'Accent'],
+  ['complement', 'Contrast'],
+  ['quad', 'Quad'],
+  ['monochrome-light', 'Light Tones'],
+  ['monochrome-dark', 'Deep Tones'],
+]
+const LIVE_COUNT = 8
+
+// Fresh seeds on every visit: hues spread evenly round the wheel from a
+// random starting point, each with its own random shade and scheme — so the
+// live palettes are different each time instead of the same eight forever.
+function randomSeeds() {
+  const offset = Math.random() * 360
+  return Array.from({ length: LIVE_COUNT }, (_, i) => {
+    const hue = (offset + i * (360 / LIVE_COUNT) + (Math.random() - 0.5) * 25 + 360) % 360
+    const [mode, modeLabel] = MODES[Math.floor(Math.random() * MODES.length)]
+    const hex = hslToHex(hue, 50 + Math.random() * 45, 38 + Math.random() * 32).slice(1)
+    return { hex, mode, name: `${hueToCategory(hue).name} ${modeLabel}` }
+  })
+}
 
 /*
   Fetches a set of real, live-generated palettes from The Color API — one
@@ -14,12 +35,13 @@ const STYLE_NAMES = ['Analogic Glow', 'Ocean Scheme', 'Fresh Mint', 'Rose Quartz
 */
 export async function fetchPalettes() {
   try {
+    const seeds = randomSeeds()
     const schemes = await Promise.all(
-      SEED_HUES.map((hex) => fetchColorScheme(hex, 'analogic', 5))
+      seeds.map((seed) => fetchColorScheme(seed.hex, seed.mode, 5))
     )
     const data = schemes.map((colors, i) => ({
       id: `live-${i + 1}`,
-      name: STYLE_NAMES[i] || `Live Palette ${i + 1}`,
+      name: seeds[i].name,
       style: 'live',
       colors,
     }))

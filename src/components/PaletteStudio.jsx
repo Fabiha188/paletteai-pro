@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import ColorSwatch from './ColorSwatch'
 import HistorySidebar from './HistorySidebar'
 import { formatColor } from '../utils/colorHelpers'
-import { fetchAIPalette } from '../utils/api'
+import { fetchFreshAIPalette } from '../utils/api'
 import { useApp } from '../context/AppContext'
 
 export default function PaletteStudio({
@@ -60,7 +60,7 @@ export default function PaletteStudio({
   const handleAPIGenerate = async () => {
     setApiLoading(true)
     try {
-      const colors = await fetchAIPalette()
+      const colors = await fetchFreshAIPalette()
       setCurrentColors(colors)
       showToast('✅ Colormind palette loaded!', 'success')
     } catch (err) {

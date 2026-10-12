@@ -1,5 +1,8 @@
+import { registerPalette, freshnessScore, distanceToRecent, deltaE } from './colorMemory'
+
 // Converts HSL values to a hex colour string
 export function hslToHex(h, s, l) {
+  h = ((h % 360) + 360) % 360 // accept negative / >360 hues
   s /= 100
   l /= 100
   const k = (n) => (n + h / 30) % 12
@@ -65,14 +68,14 @@ export function formatColor(hex, format) {
 // clear of the very top/bottom of the scale so every style still reads
 // as an actual colour — not near-black or washed-out-to-white.
 const STYLE_PRESETS = {
-  pastel:  { s: [30, 50],   l: [68, 84] },
+  pastel:  { s: [22, 60],   l: [64, 90] },
   vibrant: { s: [80, 100],  l: [45, 65] },
-  dark:    { s: [55, 85],   l: [22, 36] },
-  warm:    { h: [0, 60],    s: [60, 90], l: [40, 68] },
-  cool:    { h: [180, 300], s: [60, 90], l: [40, 68] },
-  earthy:  { s: [30, 60],   l: [32, 50] },
-  neon:    { s: [90, 100],  l: [50, 68] },
-  muted:   { s: [20, 40],   l: [48, 68] },
+  dark:    { s: [50, 85],   l: [16, 38] },
+  warm:    { h: [-20, 65],  s: [55, 92], l: [38, 72] },
+  cool:    { h: [170, 300], s: [55, 92], l: [38, 72] },
+  earthy:  { h: [8, 130],   s: [25, 62], l: [26, 54] },
+  neon:    { s: [90, 100],  l: [50, 70] },
+  muted:   { s: [15, 42],   l: [45, 70] },
 }
 
 function rand(min, max) {
@@ -86,21 +89,33 @@ function rand(min, max) {
 // and count toward variety in the Explore feed — pastel included.
 export function classifyStyle(colors) {
   if (!colors || !colors.length) return 'vibrant'
-  let totalS = 0, totalL = 0
+  let totalS = 0, totalL = 0, vx = 0, vy = 0
   colors.forEach((hex) => {
-    const { s, l } = hexToHsl(hex)
+    const { h, s, l } = hexToHsl(hex)
     totalS += s
     totalL += l
+    // saturation-weighted circular mean of the hue
+    vx += Math.cos((h * Math.PI) / 180) * s
+    vy += Math.sin((h * Math.PI) / 180) * s
   })
   const avgS = totalS / colors.length
   const avgL = totalL / colors.length
+  const avgH = ((Math.atan2(vy, vx) * 180) / Math.PI + 360) % 360
+
+  // degrees between a hue and the nearest edge of a style's allowed hue range
+  const hueGap = (range) =>
+    Math.min(...[-360, 0, 360].map((shift) => {
+      const h = avgH + shift
+      return h >= range[0] && h <= range[1] ? 0 : Math.min(Math.abs(h - range[0]), Math.abs(h - range[1]))
+    }))
 
   let best = 'vibrant'
   let bestDist = Infinity
   for (const [name, preset] of Object.entries(STYLE_PRESETS)) {
     const [sLo, sHi] = preset.s
     const [lLo, lHi] = preset.l
-    const dist = Math.abs(avgS - (sLo + sHi) / 2) + Math.abs(avgL - (lLo + lHi) / 2)
+    let dist = Math.abs(avgS - (sLo + sHi) / 2) + Math.abs(avgL - (lLo + lHi) / 2)
+    if (preset.h) dist += hueGap(preset.h) * 0.3 // warm must look warm, cool must look cool
     if (dist < bestDist) { bestDist = dist; best = name }
   }
   return best
@@ -113,7 +128,7 @@ export function getVibrantHex(hueOverride, style) {
 
   const preset = style && STYLE_PRESETS[style]
   if (preset) {
-    if (preset.h) h = rand(...preset.h)
+    if (preset.h) h = ((rand(...preset.h) % 360) + 360) % 360
     s = rand(...preset.s)
     l = rand(...preset.l)
   } else {
@@ -223,60 +238,121 @@ export function getHarmonyHues(rule, hue) {
 // feed, "AI Suggest", etc). Monochromatic is excluded here — it's great
 // for a single-hue scale, but too flat as a default surprise-me palette.
 const PALETTE_RULES = ['complementary', 'analogous', 'triadic', 'splitComplementary', 'square']
+// Extra, generator-only rules (kept out of HARMONY_RULES so the colour-wheel
+// picker in Studio Pro is unchanged) — more shapes means less sameness.
+const EXTRA_RULES = {
+  tetradic:     { label: 'Tetradic',        offsets: [0, 60, 180, 240] },
+  wideAnalogue: { label: 'Wide Analogous',  offsets: [-55, -28, 0, 28, 55] },
+  splitWide:    { label: 'Split-Complementary', offsets: [0, 165, 195] },
+}
+const ALL_RULES = [...PALETTE_RULES, ...Object.keys(EXTRA_RULES)]
+const ruleDef = (rule) => HARMONY_RULES[rule] || EXTRA_RULES[rule]
 
-// Extends a harmony rule's hue offsets out to `count` hues by cycling
-// through them again with a small random jitter, so a 5-swatch palette
-// built from a 2-hue "complementary" rule still stays visually related.
-function buildHueSequence(rule, baseHue, count) {
-  const offsets = HARMONY_RULES[rule]?.offsets || [0]
-  return Array.from({ length: count }, (_, i) => {
-    const offset = offsets[i % offsets.length]
-    const jitter = i >= offsets.length ? rand(-12, 12) : 0
-    return Math.round((baseHue + offset + jitter + 360) % 360)
+// A floor and ceiling on lightness that applies no matter what style
+// produced a colour — keeps everything readable as an actual hue.
+const MIN_READABLE_L = 12
+const MAX_READABLE_L = 92
+const CANDIDATES = 4  // whole palettes tried per request (structure variety); the freshest wins
+const PER_COLOR = 24  // options tried for every single swatch; the most different one wins
+
+// Walks around the colour wheel by the golden angle, so back-to-back
+// palettes always start from clearly different hues.
+let hueCursor = Math.random() * 360
+function nextCursor() {
+  hueCursor = (hueCursor + 137.508 + rand(-30, 30) + 360) % 360
+  return hueCursor
+}
+
+function shuffled(arr) {
+  const a = [...arr]
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1))
+    ;[a[i], a[j]] = [a[j], a[i]]
+  }
+  return a
+}
+
+// Shapes the lightness across a palette (0..1 per swatch): rising, falling,
+// peak, valley or scattered — so palettes differ in *shade structure* too.
+function lightnessPattern(count) {
+  const asc = Array.from({ length: count }, (_, i) => (count > 1 ? i / (count - 1) : 0.5))
+  const kind = Math.floor(Math.random() * 5)
+  if (kind === 0) return asc
+  if (kind === 1) return [...asc].reverse()
+  if (kind === 2) return asc.map((t) => 1 - Math.abs(2 * t - 1))
+  if (kind === 3) return asc.map((t) => Math.abs(2 * t - 1))
+  return shuffled(asc)
+}
+
+function makeCandidate(count, style, forcedRule) {
+  const preset = style && STYLE_PRESETS[style]
+  let rule = forcedRule || ALL_RULES[Math.floor(Math.random() * ALL_RULES.length)]
+  let hues
+
+  let hueRoom // how far a swatch's hue may drift from its target
+  if (preset && preset.h) {
+    // Hue-limited style (warm / cool / earthy): give each swatch its own slice
+    // of the allowed range, so palettes stay on-theme yet differ from each other.
+    rule = 'analogous'
+    const [a, b] = preset.h
+    const width = b - a
+    const slices = Array.from({ length: count }, (_, i) => a + ((i + 0.5) / count) * width)
+    const order = Math.floor(Math.random() * 3)
+    hues = order === 0 ? slices : order === 1 ? [...slices].reverse() : shuffled(slices)
+    hueRoom = (width / count) * 0.6
+  } else {
+    const offsets = ruleDef(rule).offsets
+    const base = nextCursor()
+    hues = Array.from({ length: count }, (_, i) => base + offsets[i % offsets.length])
+    hueRoom = 16
+  }
+
+  const [lo, hi] = preset ? preset.l : [28, 80]
+  const span = hi - lo
+  const winLo = lo + rand(0, span * 0.15)
+  const winHi = hi - rand(0, span * 0.15)
+  const pattern = lightnessPattern(count)
+  const [sLo, sHi] = preset ? preset.s : [68, 100]
+  const clampL = (l) => Math.max(MIN_READABLE_L, Math.min(MAX_READABLE_L, Math.max(lo, Math.min(hi, l))))
+
+  // Pick each swatch from PER_COLOR options: whichever is farthest (as the
+  // eye sees it) from recently shown colours and from this palette's others.
+  const colors = []
+  hues.forEach((hue, i) => {
+    const targetL = winLo + pattern[i] * (winHi - winLo)
+    let bestHex = null
+    let bestScore = -Infinity
+    for (let t = 0; t < PER_COLOR; t++) {
+      let h = hue + rand(-hueRoom, hueRoom)
+      if (preset && preset.h) h = Math.max(preset.h[0], Math.min(preset.h[1], h))
+      const hex = hslToHex(
+        h,
+        Math.round(rand(sLo, sHi)),
+        Math.round(clampL(targetL + rand(-7, 7)))
+      )
+      const nearest = colors.length ? Math.min(...colors.map((c) => deltaE(c, hex))) : Infinity
+      const score = Math.min(Math.min(distanceToRecent(hex), 60), Math.min(nearest, 50) * 1.2)
+      if (score > bestScore) { bestScore = score; bestHex = hex }
+    }
+    colors.push(bestHex)
   })
+
+  return { colors, rule, label: ruleDef(rule)?.label || 'Custom' }
 }
 
 // Builds a palette whose hues follow a real colour-harmony rule (so the
-// colours *combine* well) and whose lightness ramps steadily from light
-// to dark across the whole set — then gets a final contrast pass — so
-// every swatch stays visually distinct from the others, even when a rule
-// with few hues (e.g. 2-hue "complementary") has to repeat a hue to fill
-// out the palette. Returns which rule was used, for labelling.
-// A floor and ceiling on lightness that applies no matter what style or
-// safety-nudge produced a colour — keeps everything readable as an
-// actual hue instead of drifting to near-black or near-white.
-const MIN_READABLE_L = 12
-const MAX_READABLE_L = 90
-
+// colours *combine* well) and which is chosen to look different from every
+// palette generated recently: several candidates are made and the one whose
+// colours are farthest from recent ones (and from each other) is kept.
+// Returns which rule was used, for labelling.
 export function buildHarmonyPalette(count = 5, style = null, forcedRule = null) {
-  const rule = forcedRule || PALETTE_RULES[Math.floor(Math.random() * PALETTE_RULES.length)]
-  const baseHue = Math.floor(Math.random() * 360)
-  const hues = buildHueSequence(rule, baseHue, count)
-  const preset = style && STYLE_PRESETS[style]
-  const [lo, hi] = preset ? preset.l : [30, 78]
-  // Even spacing across the full range, so no two indices can land on
-  // the same lightness band the way a simple even/odd alternation could.
-  const step = count > 1 ? (hi - lo) / (count - 1) : 0
-
-  const colors = hues.map((h, i) => {
-    const s = preset ? rand(...preset.s) : rand(75, 100)
-    let l = lo + step * i + rand(-3, 3) // small jitter keeps it from looking mechanical
-    l = Math.max(MIN_READABLE_L, Math.min(MAX_READABLE_L, l))
-    return hslToHex(h, Math.round(s), Math.round(l))
-  })
-
-  // Safety pass: nudge any colour that's too close in contrast to the
-  // one right before it (checked against every earlier colour too, so a
-  // nudge can't accidentally land back on one from further up the list).
-  for (let i = 1; i < colors.length; i++) {
-    let guard = 0
-    while (guard < 8 && colors.slice(0, i).some((c) => getContrastRatio(c, colors[i]) < 1.4)) {
-      const hsl = hexToHsl(colors[i])
-      const nudged = hsl.l > 50 ? hsl.l + (10 + guard * 4) : hsl.l - (10 + guard * 4)
-      colors[i] = hslToHex(hsl.h, hsl.s, Math.max(MIN_READABLE_L, Math.min(MAX_READABLE_L, nudged)))
-      guard++
-    }
+  let best = null
+  let bestScore = -Infinity
+  for (let k = 0; k < CANDIDATES; k++) {
+    const candidate = makeCandidate(count, style, forcedRule)
+    const score = freshnessScore(candidate.colors)
+    if (score > bestScore) { best = candidate; bestScore = score }
   }
-
-  return { colors, rule, label: HARMONY_RULES[rule]?.label || 'Custom' }
+  registerPalette(best.colors)
+  return best
 }

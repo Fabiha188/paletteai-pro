@@ -5,6 +5,7 @@ import SearchBar from './SearchBar'
 import ColorSearch from './ColorSearch'
 import ImageExtractor from './ImageExtractor'
 import { buildHarmonyPalette, classifyStyle } from '../utils/colorHelpers'
+import { registerPalette } from '../utils/colorMemory'
 import { fetchPalettes } from '../utils/fetchPalettes'
 import { useApp } from '../context/AppContext'
 
@@ -112,6 +113,7 @@ export default function Explore() {
 
       const combined = [...base, ...extra]
       loadedRef.current = true
+      combined.forEach((p) => registerPalette(p.colors))
       setAllPalettes(combined)
       setFiltered(combined)
       setLoaded(true)
@@ -143,8 +145,12 @@ export default function Explore() {
       const pool = matched && matched.length ? matched : STYLES
       const batch = generateBatch(genCountRef.current, locked, pool)
       genCountRef.current += BATCH_SIZE
+      // The search may have changed while this batch was being made, so decide
+      // what is visible using the search as it is *now*.
+      const now = searchRef.current
+      const visible = now.isHex ? [] : now.matched ? batch.filter((p) => now.matched.includes(p.style)) : batch
       setAllPalettes((prev) => [...prev, ...batch])
-      setFiltered((prev) => [...prev, ...batch])
+      setFiltered((prev) => [...prev, ...visible])
       busyRef.current = false
       setLoadingMore(false)
     }, 250)
@@ -152,18 +158,33 @@ export default function Explore() {
 
   const noResults = loaded && filtered.length === 0
 
-  // Infinite scroll: load another batch whenever the sentinel at the
-  // bottom of the grid comes into view.
-  useEffect(() => {
+  // Unlimited scroll: whenever the bottom of the grid is within ~one screen of
+  // the viewport, generate another batch — and re-check after each batch lands,
+  // so the feed keeps filling by itself. No button, no reload.
+  const checkSentinel = useCallback(() => {
     const el = sentinelRef.current
     if (!el) return
-    const observer = new IntersectionObserver(
-      (entries) => { if (entries[0].isIntersecting) loadMore() },
-      { rootMargin: '400px' }
-    )
-    observer.observe(el)
-    return () => observer.disconnect()
-  }, [loadMore, loaded, isHexSearch, noResults])
+    if (el.getBoundingClientRect().top < window.innerHeight + 700) loadMore()
+  }, [loadMore])
+
+  useEffect(() => {
+    if (loaded && !loadingMore) checkSentinel()
+  }, [loaded, loadingMore, filtered.length, isHexSearch, noResults, checkSentinel])
+
+  useEffect(() => {
+    let ticking = false
+    const onScroll = () => {
+      if (ticking) return
+      ticking = true
+      requestAnimationFrame(() => { ticking = false; checkSentinel() })
+    }
+    window.addEventListener('scroll', onScroll, { passive: true })
+    window.addEventListener('resize', onScroll)
+    return () => {
+      window.removeEventListener('scroll', onScroll)
+      window.removeEventListener('resize', onScroll)
+    }
+  }, [checkSentinel])
 
   const handleSearch = (term) => {
     setSearchTerm(term)
@@ -305,18 +326,10 @@ export default function Explore() {
 
       {loaded && !isHexSearch && !(searchRef.current.matched && searchRef.current.matched.length === 0) && (
         <div className="explore-nav">
-          <button
-            className="nav-next"
-            onClick={loadMore}
-            disabled={loadingMore}
-          >
-            {loadingMore ? (
-              <>✨ Generating more…</>
-            ) : (
-              <><i className="fas fa-shuffle"></i> Load More Palettes</>
-            )}
-          </button>
-          {/* Invisible trigger — scrolling this into view loads more automatically */}
+          <div className="explore-loading-more" aria-live="polite">
+            {loadingMore ? '✨ Generating more palettes…' : '\u00A0'}
+          </div>
+          {/* Position marker: when it nears the screen, more palettes load automatically */}
           <div ref={sentinelRef} style={{ width: '100%', height: '1px' }} />
         </div>
       )}

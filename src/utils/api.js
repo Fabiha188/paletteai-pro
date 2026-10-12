@@ -1,3 +1,4 @@
+import { registerPalette, isTooSimilar } from './colorMemory'
 const COLORMIND_URL = 'https://colormind.io/api/'
 const COLOR_API_BASE = 'https://www.thecolorapi.com'
 
@@ -104,4 +105,19 @@ export async function fetchColorInfo(hex) {
     hsl:      data.hsl?.value      || '',
     contrast: data.contrast?.value || '',
   }
+}
+
+/*
+  Same as fetchAIPalette, but if the model hands back a palette that mostly
+  repeats colours we've shown recently, ask again (up to 3 tries) and keep the
+  freshest one. Every palette returned is remembered, so generated palettes
+  elsewhere in the app steer clear of it too.
+*/
+export async function fetchFreshAIPalette(model = 'default') {
+  let colors = await fetchAIPalette(model)
+  for (let attempt = 0; attempt < 2 && isTooSimilar(colors); attempt++) {
+    try { colors = await fetchAIPalette(model) } catch { break }
+  }
+  registerPalette(colors)
+  return colors
 }

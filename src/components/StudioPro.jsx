@@ -6,7 +6,7 @@ import {
   HARMONY_RULES, getHarmonyColors, getHarmonyHues,
   isValidHex, normalizeHex,
 } from '../utils/colorHelpers'
-import { fetchAIPalette } from '../utils/api'
+import { fetchFreshAIPalette } from '../utils/api'
 import { useApp } from '../context/AppContext'
 
 export default function StudioPro() {
@@ -172,7 +172,7 @@ export default function StudioPro() {
   // graceful local fallback if the API call fails on a retry too.
   const regenerateAPI = async () => {
     try {
-      const colors = await fetchAIPalette()
+      const colors = await fetchFreshAIPalette()
       setGeneratedColors(colors)
       setHex(colors[0])
       updateFromHex(colors[0])
@@ -188,7 +188,7 @@ export default function StudioPro() {
     setLastGenerator('api')
     setApiLoading(true)
     try {
-      const colors = await fetchAIPalette()
+      const colors = await fetchFreshAIPalette()
       applyColors(colors, regenerateAPI)
       showToast('✅ Colormind palette loaded!', 'success')
     } catch (err) {
